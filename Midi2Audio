@@ -1,0 +1,98 @@
+import os
+import zipfile
+import librosa
+import numpy as np
+import pandas as pd
+import music21 as m21
+import time
+
+# Step 1: Extract the ZIP file
+zip_file_path = '/content/Composer_Dataset.zip'  # Path to your uploaded zip file
+extract_dir = '/content/Composer_Dataset'  # Directory where the files will be extracted
+
+with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+    zip_ref.extractall(extract_dir)
+
+# Step 2: Define feature extraction functions
+def extract_midi_features(midi_file, timeout=10):
+    try:
+        start_time = time.time()
+        midi = m21.converter.parse(midi_file)
+        if time.time() - start_time > timeout:
+            print(f"Skipping {midi_file} due to timeout")
+            return None, None
+
+        notes = [note for note in midi.flat.notes]
+        num_notes = len(notes)
+        avg_note_duration = sum([note.duration.quarterLength for note in notes]) / num_notes if num_notes > 0 else 0
+        return num_notes, avg_note_duration
+    except Exception as e:
+        print(f"Error processing {midi_file}: {e}")
+        return None, None
+
+def extract_audio_features(audio_file):
+    try:
+        y, sr = librosa.load(audio_file, sr=None)
+
+        # Mel spectrogram
+        mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr)
+        log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
+
+        # Chroma features
+        chroma_stft = librosa.feature.chroma_stft(y=y, sr=sr)
+
+        # Tempo
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+
+        # Combine features into one array
+        feature_vector = np.concatenate((log_mel_spectrogram.flatten(), chroma_stft.flatten(), [tempo]))
+        return feature_vector
+    except Exception as e:
+        print(f"Error processing {audio_file}: {e}")
+        return None
+
+def create_dataset(directory, batch_size=100):
+    features = []
+    labels = []
+    composers = os.listdir(directory)
+    count = 0
+    for composer in composers:
+        composer_dir = os.path.join(directory, composer)
+        if os.path.isdir(composer_dir):
+            files = [f for f in os.listdir(composer_dir) if f.endswith(('.mid', '.wav'))]
+            for file in files:
+                file_path = os.path.join(composer_dir, file)
+                if file.endswith('.mid'):
+                    num_notes, avg_note_duration = extract_midi_features(file_path)
+                    if num_notes is not None:
+                        features.append([num_notes, avg_note_duration])
+                        labels.append(composer)
+                elif file.endswith('.wav'):
+                    feature_vector = extract_audio_features(file_path)
+                    if feature_vector is not None:
+                        features.append(feature_vector)
+                        labels.append(composer)
+                
+                count += 1
+                if count % batch_size == 0:
+                    print(f"Processed {count} files so far...")
+
+    return np.array(features), np.array(labels)
+
+# Step 3: Define paths to the train, test, and dev directories within the extracted dataset
+train_dir = os.path.join(extract_dir, 'Composer_Dataset', 'NN_midi_files_extended', 'train')
+test_dir = os.path.join(extract_dir, 'Composer_Dataset', 'NN_midi_files_extended', 'test')
+dev_dir = os.path.join(extract_dir, 'Composer_Dataset', 'NN_midi_files_extended', 'dev')
+
+# Step 4: Create datasets
+train_features, train_labels = create_dataset(train_dir)
+test_features, test_labels = create_dataset(test_dir)
+dev_features, dev_labels = create_dataset(dev_dir)
+
+# Step 5: Save datasets as .npz files
+np.savez('/content/train_dataset.npz', features=train_features, labels=train_labels)
+np.savez('/content/test_dataset.npz', features=test_features, labels=test_labels)
+np.savez('/content/dev_dataset.npz', features=dev_features, labels=dev_labels)
+
+print("Datasets created and saved as .npz files.")
